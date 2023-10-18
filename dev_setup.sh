@@ -8,7 +8,9 @@ pip install rich tqdm ninja torch numpy scipy \
 pip install torch_efficient_distloss
 pip install git+https://github.com/NVlabs/nvdiffrast/
 
+cd ./octree_nerf/Lib
 pip install ./raymarching
 pip install ./gridencoder
 pip install ./freqencoder
 pip install ./shencoder
+cd ../..
