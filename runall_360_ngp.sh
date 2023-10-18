@@ -1,5 +1,6 @@
-CUDA_VISIBLE_DEVICES=4 python main.py data/room/ \
-	--workspace trial_ngp_360_room \
+CUDA_VISIBLE_DEVICES=4 python main.py \
+	/home/chli/Dataset/NeRF/3vjia_simple/ \
+	--workspace ngp_3vjia_simple \
 	--enable_cam_center \
 	--enable_cam_near_far \
 	--min_near 0.2 \
