@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import torch
-import numpy as np
+
 
 def contract(x):
     # x: [..., C]
@@ -44,4 +44,3 @@ plt.plot(rpoints[:, 0].cpu().numpy(), rpoints[:, 1].cpu().numpy(), 'x', label='u
 plt.grid()
 plt.legend()
 plt.show()
-
