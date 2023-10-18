@@ -5,6 +5,9 @@ dist/
 *.egg-info/
 *.so
 
+# output
+logs
+
 tmp*
 data/
 data
