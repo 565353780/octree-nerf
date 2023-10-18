@@ -1,6 +1,6 @@
 CUDA_VISIBLE_DEVICES=4 python main.py \
 	/home/chli/Dataset/NeRF/3vjia_simple/ \
-	--workspace ngp_3vjia_simple \
+	--workspace logs/3vjia_simple \
 	--enable_cam_center \
 	--enable_cam_near_far \
 	--min_near 0.2 \
@@ -12,4 +12,3 @@ CUDA_VISIBLE_DEVICES=4 python main.py \
 	-O \
 	--background random \
 	--bound 8
-
