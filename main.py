@@ -4,6 +4,9 @@ import argparse
 from nerf.gui import NeRFGUI
 from nerf.utils import *
 
+from octree_nerf.Model.ngp import NeRFNetwork
+from octree_nerf.Module.trainer import Trainer
+
 # torch.autograd.set_detect_anomaly(True)
 
 if __name__ == '__main__':
@@ -109,15 +112,14 @@ if __name__ == '__main__':
         opt.mark_untrained = False
 
     if opt.data_format == 'colmap':
-        from nerf.colmap_provider import ColmapDataset as NeRFDataset
+        from octree_nerf.Dataset.colmap import ColmapDataset as NeRFDataset
     elif opt.data_format == 'dtu':
-        from nerf.dtu_provider import NeRFDataset
+        from octree_nerf.Dataset.dtu import DTUDataset as NeRFDataset
     else: # nerf
-        from nerf.provider import NeRFDataset
+        from octree_nerf.Dataset.nerf import NeRFDataset
     
     seed_everything(opt.seed)
 
-    from nerf.network import NeRFNetwork
 
     model = NeRFNetwork(opt)
     
