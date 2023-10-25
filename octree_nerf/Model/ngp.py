@@ -2,9 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from encoding import get_encoder
-from activation import trunc_exp
-
+from octree_nerf.Model.activation import trunc_exp
+from octree_nerf.Model.encoder import get_encoder
 from octree_nerf.Model.renderer import NeRFRenderer
 
 

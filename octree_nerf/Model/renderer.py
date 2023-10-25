@@ -8,8 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
 import trimesh
-from meshutils import *
 
+from octree_nerf.Method.mesh import *
 from octree_nerf.Lib import raymarching
 from octree_nerf.Method.mesh import custom_meshgrid
 

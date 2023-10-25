@@ -6,17 +6,18 @@ def contract(x):
     # x: [..., C]
     shape, C = x.shape[:-1], x.shape[-1]
     x = x.view(-1, C)
-    mag, idx = x.abs().max(1, keepdim=True) # [N, 1], [N, 1]
+    mag, idx = x.abs().max(1, keepdim=True)  # [N, 1], [N, 1]
     scale = 1 / mag.repeat(1, C)
     scale.scatter_(1, idx, (2 - 1 / mag) / mag)
     cx = torch.where(mag < 1, x, x * scale)
     return cx.view(*shape, C)
 
+
 def uncontract(x):
     # x: [..., C]
     shape, C = x.shape[:-1], x.shape[-1]
     x = x.view(-1, C)
-    mag, idx = x.abs().max(1, keepdim=True) # [N, 1], [N, 1]
+    mag, idx = x.abs().max(1, keepdim=True)  # [N, 1], [N, 1]
     scale = 1 / (2 - mag.repeat(1, C)).clamp(min=1e-8)
     scale.scatter_(1, idx, 1 / (2 * mag - mag * mag).clamp(min=1e-8))
     cx = torch.where(mag < 1, x, x * scale)
@@ -37,9 +38,13 @@ cpoints = contract(points)
 
 rpoints = uncontract(cpoints)
 
-plt.plot(points[:, 0].cpu().numpy(), points[:, 1].cpu().numpy(), 'o', label='original')
-plt.plot(cpoints[:, 0].cpu().numpy(), cpoints[:, 1].cpu().numpy(), 'o', label='contracted')
-plt.plot(rpoints[:, 0].cpu().numpy(), rpoints[:, 1].cpu().numpy(), 'x', label='uncontracted')
+plt.plot(points[:, 0].cpu().numpy(), points[:, 1].cpu().numpy(), "o", label="original")
+plt.plot(
+    cpoints[:, 0].cpu().numpy(), cpoints[:, 1].cpu().numpy(), "o", label="contracted"
+)
+plt.plot(
+    rpoints[:, 0].cpu().numpy(), rpoints[:, 1].cpu().numpy(), "x", label="uncontracted"
+)
 
 plt.grid()
 plt.legend()
