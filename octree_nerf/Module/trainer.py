@@ -11,9 +11,10 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
-
 from rich.console import Console
 from torch_ema import ExponentialMovingAverage
+
+from octree_nerf.Method.ray import get_rays
 
 
 class Trainer(object):

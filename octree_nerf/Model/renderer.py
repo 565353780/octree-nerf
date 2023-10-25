@@ -9,7 +9,9 @@ import torch.nn.functional as F
 import tqdm
 import trimesh
 
-from octree_nerf.Method.mesh import *
+from octree_nerf.Method.render import contract, uncontract
+from octree_nerf.Loss.distort import distort_loss
+from octree_nerf.Loss.proposal import proposal_loss
 from octree_nerf.Lib import raymarching
 from octree_nerf.Method.mesh import custom_meshgrid
 

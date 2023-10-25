@@ -2,14 +2,14 @@ import torch
 import argparse
 import numpy as np
 
-from nerf.gui import NeRFGUI
 
 from octree_nerf.Metric.lpips import LPIPSMeter
 from octree_nerf.Metric.psnr import PSNRMeter
 from octree_nerf.Metric.ssim import SSIMMeter
-from octree_nerf.Method.random import seed_everything
+from octree_nerf.Method.random_seed import seed_everything
 from octree_nerf.Model.ngp import NeRFNetwork
 from octree_nerf.Module.trainer import Trainer
+from octree_nerf.Module.gui import NeRFGUI
 
 # torch.autograd.set_detect_anomaly(True)
 

@@ -11,4 +11,5 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
 	--downscale 4 \
 	-O \
 	--background random \
-	--bound 8
+	--bound 8 \
+	--gui
