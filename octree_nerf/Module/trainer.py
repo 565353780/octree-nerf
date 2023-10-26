@@ -52,20 +52,24 @@ class Trainer(object):
         self.scheduler_update_every_step=False
         self.report_metric_at_train = True
         self.use_checkpoint = 'latest'
+        self.batch_size = 4
         self.ema_decay = 0.95
         self.max_keep_ckpt = 2
         self.eval_interval = 100
         self.save_interval = 100
 
         self.workspace = self.opt.workspace
+        os.makedirs('./logs/' + self.workspace + '/', exist_ok=True)
+        os.makedirs('./output/' + self.workspace + '/', exist_ok=True)
+
         self.fp16 = self.opt.fp16
 
         # self.criterion = torch.nn.MSELoss(reduction='none').to(self.device)
         self.criterion = torch.nn.SmoothL1Loss(reduction="none").to(self.device)
 
-        self.train_loader = ColmapDataset(self.opt, device=self.device, type=self.opt.train_split).dataloader()
-        self.test_loader = ColmapDataset(self.opt, device=self.device, type="test").dataloader()
-        self.valid_loader = ColmapDataset(self.opt, device=self.device, type="val").dataloader()
+        self.train_loader = ColmapDataset(self.opt, device=self.device, type=self.opt.train_split).dataloader(self.batch_size)
+        self.test_loader = ColmapDataset(self.opt, device=self.device, type="test").dataloader(self.batch_size)
+        self.valid_loader = ColmapDataset(self.opt, device=self.device, type="val").dataloader(self.batch_size)
 
         self.metrics = [PSNRMeter()]
         if self.test_loader.has_gt:
@@ -77,10 +81,10 @@ class Trainer(object):
         if torch.__version__[0] == "2":
             self.model = torch.compile(self.model)
 
-        self.optimizer = torch.optim.Adam(self.model.get_params(self.opt.lr), eps=1e-15)
+        self.optimizer = torch.optim.Adam(self.model.get_params(self.opt.lr * self.batch_size), eps=1e-15)
 
         self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer, lambda iter: 0.1 ** min(iter / self.opt.iters, 1)
+            self.optimizer, lambda iter: 0.1 ** min(iter / self.opt.iters * self.batch_size, 1)
         )
 
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.fp16)
@@ -102,16 +106,15 @@ class Trainer(object):
         # workspace prepare
         self.log_ptr = None
         if self.workspace is not None:
-            os.makedirs(self.workspace, exist_ok=True)
-            self.log_path = os.path.join(self.workspace, f"log_ngp.txt")
+            self.log_path = './output/' + self.workspace + "/log.txt"
             self.log_ptr = open(self.log_path, "a+")
 
-            self.ckpt_path = os.path.join(self.workspace, "checkpoints")
-            self.best_path = f"{self.ckpt_path}/ngp.pth"
+            self.ckpt_path = './output/' + self.workspace + "/checkpoints"
+            self.best_path = f"{self.ckpt_path}/model_best.pth"
             os.makedirs(self.ckpt_path, exist_ok=True)
 
         self.log(
-            f'[INFO] Trainer: ngp | {self.time_stamp} | {self.device} | {"fp16" if self.fp16 else "fp32"} | {self.workspace}'
+            f'[INFO] Trainer: {self.workspace} | {self.time_stamp} | {self.device} | {"fp16" if self.fp16 else "fp32"}'
         )
         self.log(
             f"[INFO] #parameters: {sum([p.numel() for p in self.model.parameters() if p.requires_grad])}"
@@ -153,21 +156,21 @@ class Trainer(object):
     ### ------------------------------
 
     def train_step(self, data):
-        rays_o = data["rays_o"]  # [N, 3]
-        rays_d = data["rays_d"]  # [N, 3]
-        index = data["index"]  # [1/N]
+        rays_o = data["rays_o"]  # [B, N, 3]
+        rays_d = data["rays_d"]  # [B, N, 3]
+        index = data["index"]  # [B, N]
         cam_near_far = (
             data["cam_near_far"] if "cam_near_far" in data else None
-        )  # [1/N, 2] or None
+        )  # [B, N, 2] or None
 
-        images = data["images"]  # [N, 3/4]
+        images = data["images"]  # [B, N, 3/4]
 
-        N, C = images.shape
+        B, N, C = images.shape
 
         if self.opt.background == "random":
             bg_color = torch.rand(
-                N, 3, device=self.device
-            )  # [N, 3], pixel-wise random.
+                B, N, 3, device=self.device
+            )  # [B, N, 3], pixel-wise random.
         else:  # white / last_sample
             bg_color = 1
 
@@ -194,7 +197,7 @@ class Trainer(object):
 
         # MSE loss
         pred_rgb = outputs["image"]
-        loss = self.criterion(pred_rgb, gt_rgb).mean(-1)  # [N, 3] --> [N]
+        loss = self.criterion(pred_rgb, gt_rgb).mean(-1)  # [B, N, 3] --> [B, N]
 
         loss = loss.mean()
 
@@ -299,7 +302,7 @@ class Trainer(object):
         self, save_path=None, resolution=128, decimate_target=1e5, dataset=None
     ):
         if save_path is None:
-            save_path = os.path.join(self.workspace, "mesh")
+            save_path = './output/' + self.workspace + "/mesh/"
 
         self.log(f"==> Saving mesh to {save_path}")
 
@@ -317,9 +320,7 @@ class Trainer(object):
     ### ------------------------------
 
     def train(self, train_loader, valid_loader, max_epochs):
-        self.writer = tensorboardX.SummaryWriter(
-            os.path.join(self.workspace, "run", "ngp")
-        )
+        self.writer = tensorboardX.SummaryWriter('./logs/' + self.workspace)
 
         # mark untrained region (i.e., not covered by any camera from the training dataset)
         if self.opt.mark_untrained:
@@ -353,7 +354,7 @@ class Trainer(object):
 
     def test(self, loader, save_path=None, name=None, write_video=True):
         if save_path is None:
-            save_path = os.path.join(self.workspace, "results")
+            save_path = './output/' + self.workspace + "/results/"
 
         if name is None:
             name = f"ngp_ep{self.epoch:04d}"
@@ -606,6 +607,12 @@ class Trainer(object):
         self.local_step = 0
 
         for data in loader:
+            if False:
+                print('data:')
+                for key, item in data.items():
+                    if isinstance(item, torch.Tensor):
+                        print(key, '-->', item.shape)
+
             # update grid every 16 steps
             if (
                 self.model.cuda_ray
@@ -718,21 +725,14 @@ class Trainer(object):
                     metric_vals.append(metric_val)
 
                 # save image
-                save_path = os.path.join(
-                    self.workspace,
-                    "validation",
-                    f"{name}_{self.local_step:04d}_rgb.png",
-                )
-                save_path_depth = os.path.join(
-                    self.workspace,
-                    "validation",
-                    f"{name}_{self.local_step:04d}_depth.png",
-                )
-                save_path_error = os.path.join(
-                    self.workspace,
-                    "validation",
-                    f"{name}_{self.local_step:04d}_error_{metric_vals[0]:.2f}.png",
-                )  # metric_vals[0] should be the PSNR
+                save_path = './output/' + self.workspace + "/validation/" + \
+                    f"{name}_{self.local_step:04d}_rgb.png"
+
+                save_path_depth = './output/' + self.workspace + "/validation/" + \
+                    f"{name}_{self.local_step:04d}_depth.png"
+
+                save_path_error = './output/' + self.workspace + "/validation/" + \
+                    f"{name}_{self.local_step:04d}_error_{metric_vals[0]:.2f}.png"
 
                 # self.log(f"==> Saving validation image to {save_path}")
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)

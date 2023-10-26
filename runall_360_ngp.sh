@@ -1,6 +1,6 @@
 CUDA_VISIBLE_DEVICES=0 python main.py \
 	/home/chli/Dataset/NeRF/3vjia_simple/ \
-	--workspace logs/3vjia_simple \
+	--workspace 3vjia_simple_4 \
 	--enable_cam_center \
 	--enable_cam_near_far \
 	--min_near 0.2 \

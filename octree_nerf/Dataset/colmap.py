@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import tqdm
 from scipy.spatial.transform import Rotation, Slerp
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 
 from octree_nerf.Method.colmap_io import *
 
@@ -14,7 +14,7 @@ from octree_nerf.Method.camera import create_dodecahedron_cameras
 from octree_nerf.Method.pose.colmap import center_poses, visualize_poses
 
 
-class ColmapDataset:
+class ColmapDataset(Dataset):
     def __init__(self, opt, device, type="train", n_test=24):
         super().__init__()
         self.opt = opt
@@ -412,12 +412,16 @@ class ColmapDataset:
 
         return results
 
-    def dataloader(self):
-        size = len(self.poses)
+    def __len__(self):
+        return len(self.poses)
+
+    def __getitem__(self, index):
+        return self.collate(index)
+
+    def dataloader(self, batch_size=1):
         loader = DataLoader(
-            list(range(size)),
-            batch_size=1,
-            collate_fn=self.collate,
+            self,
+            batch_size=batch_size,
             shuffle=self.training,
             num_workers=0,
         )
