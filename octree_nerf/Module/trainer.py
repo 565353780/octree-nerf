@@ -7,7 +7,6 @@ import imageio
 import numpy as np
 import tensorboardX
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
@@ -28,10 +27,6 @@ class Trainer(object):
         ema_decay=None,  # if use EMA, set the decay
         lr_scheduler=None,  # scheduler
         metrics=[],  # metrics for evaluation, if None, use val_loss to measure performance, else use the first metric.
-        local_rank=0,  # which GPU am I
-        world_size=1,  # total num of GPUs
-        device=None,  # device to use, usually setting to None is OK. (auto choose device)
-        mute=False,  # whether to mute all print
         fp16=False,  # amp optimize level
         eval_interval=1,  # eval once every $ epoch
         save_interval=1,  # save once every $ epoch (independently from eval)
@@ -46,10 +41,7 @@ class Trainer(object):
     ):
         self.opt = opt
         self.name = name
-        self.mute = mute
         self.metrics = metrics
-        self.local_rank = local_rank
-        self.world_size = world_size
         self.workspace = workspace
         self.ema_decay = ema_decay
         self.fp16 = fp16
@@ -63,13 +55,7 @@ class Trainer(object):
         self.use_tensorboardX = use_tensorboardX
         self.time_stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         self.scheduler_update_every_step = scheduler_update_every_step
-        self.device = (
-            device
-            if device is not None
-            else torch.device(
-                f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
-            )
-        )
+        self.device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
         self.console = Console()
 
         # try out torch 2.0
@@ -77,11 +63,6 @@ class Trainer(object):
             model = torch.compile(model)
 
         model.to(self.device)
-        if self.world_size > 1:
-            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-            model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[local_rank]
-            )
         self.model = model
 
         if isinstance(criterion, nn.Module):
@@ -162,13 +143,10 @@ class Trainer(object):
             self.log_ptr.close()
 
     def log(self, *args, **kwargs):
-        if self.local_rank == 0:
-            if not self.mute:
-                # print(*args)
-                self.console.print(*args, **kwargs)
-            if self.log_ptr:
-                print(*args, file=self.log_ptr)
-                self.log_ptr.flush()  # write immediately to file
+        self.console.print(*args, **kwargs)
+        if self.log_ptr:
+            print(*args, file=self.log_ptr)
+            self.log_ptr.flush()  # write immediately to file
 
     ### ------------------------------
 
@@ -337,7 +315,7 @@ class Trainer(object):
     ### ------------------------------
 
     def train(self, train_loader, valid_loader, max_epochs):
-        if self.use_tensorboardX and self.local_rank == 0:
+        if self.use_tensorboardX:
             self.writer = tensorboardX.SummaryWriter(
                 os.path.join(self.workspace, "run", self.name)
             )
@@ -355,8 +333,7 @@ class Trainer(object):
 
             if (
                 (self.epoch % self.save_interval == 0 or self.epoch == max_epochs)
-                and self.workspace is not None
-                and self.local_rank == 0
+                    and self.workspace is not None
             ):
                 self.save_checkpoint(full=True, best=False)
 
@@ -368,7 +345,7 @@ class Trainer(object):
 
         self.log(f"[INFO] training takes {(end_t - start_t)/ 60:.6f} minutes.")
 
-        if self.use_tensorboardX and self.local_rank == 0:
+        if self.use_tensorboardX:
             self.writer.close()
 
     def evaluate(self, loader, name=None):
@@ -614,7 +591,7 @@ class Trainer(object):
         )
 
         total_loss = 0
-        if self.local_rank == 0 and self.report_metric_at_train:
+        if self.report_metric_at_train:
             for metric in self.metrics:
                 metric.clear()
 
@@ -622,14 +599,11 @@ class Trainer(object):
 
         # distributedSampler: must call set_epoch() to shuffle indices across multiple epochs
         # ref: https://pytorch.org/docs/stable/data.html
-        if self.world_size > 1:
-            loader.sampler.set_epoch(self.epoch)
 
-        if self.local_rank == 0:
-            pbar = tqdm.tqdm(
-                total=len(loader) * loader.batch_size,
-                bar_format="{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
-            )
+        pbar = tqdm.tqdm(
+            total=len(loader) * loader.batch_size,
+            bar_format="{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        )
 
         self.local_step = 0
 
@@ -663,28 +637,27 @@ class Trainer(object):
             loss_val = loss_net.item()
             total_loss += loss_val
 
-            if self.local_rank == 0:
-                if self.report_metric_at_train:
-                    for metric in self.metrics:
-                        metric.update(preds, truths)
+            if self.report_metric_at_train:
+                for metric in self.metrics:
+                    metric.update(preds, truths)
 
-                if self.use_tensorboardX:
-                    self.writer.add_scalar("train/loss", loss_val, self.global_step)
-                    self.writer.add_scalar(
-                        "train/lr",
-                        self.optimizer.param_groups[0]["lr"],
-                        self.global_step,
-                    )
+            if self.use_tensorboardX:
+                self.writer.add_scalar("train/loss", loss_val, self.global_step)
+                self.writer.add_scalar(
+                    "train/lr",
+                    self.optimizer.param_groups[0]["lr"],
+                    self.global_step,
+                )
 
-                if self.scheduler_update_every_step:
-                    pbar.set_description(
-                        f"loss={loss_val:.6f} ({total_loss/self.local_step:.6f}), lr={self.optimizer.param_groups[0]['lr']:.6f}"
-                    )
-                else:
-                    pbar.set_description(
-                        f"loss={loss_val:.6f} ({total_loss/self.local_step:.6f})"
-                    )
-                pbar.update(loader.batch_size)
+            if self.scheduler_update_every_step:
+                pbar.set_description(
+                    f"loss={loss_val:.6f} ({total_loss/self.local_step:.6f}), lr={self.optimizer.param_groups[0]['lr']:.6f}"
+                )
+            else:
+                pbar.set_description(
+                    f"loss={loss_val:.6f} ({total_loss/self.local_step:.6f})"
+                )
+            pbar.update(loader.batch_size)
 
         if self.ema is not None:
             self.ema.update()
@@ -692,14 +665,13 @@ class Trainer(object):
         average_loss = total_loss / self.local_step
         self.stats["loss"].append(average_loss)
 
-        if self.local_rank == 0:
-            pbar.close()
-            if self.report_metric_at_train:
-                for metric in self.metrics:
-                    self.log(metric.report(), style="red")
-                    if self.use_tensorboardX:
-                        metric.write(self.writer, self.epoch, prefix="train")
-                    metric.clear()
+        pbar.close()
+        if self.report_metric_at_train:
+            for metric in self.metrics:
+                self.log(metric.report(), style="red")
+                if self.use_tensorboardX:
+                    metric.write(self.writer, self.epoch, prefix="train")
+                metric.clear()
 
         if not self.scheduler_update_every_step:
             if isinstance(
@@ -718,9 +690,8 @@ class Trainer(object):
             name = f"{self.name}_ep{self.epoch:04d}"
 
         total_loss = 0
-        if self.local_rank == 0:
-            for metric in self.metrics:
-                metric.clear()
+        for metric in self.metrics:
+            metric.clear()
 
         self.model.eval()
 
@@ -728,11 +699,10 @@ class Trainer(object):
             self.ema.store()
             self.ema.copy_to()
 
-        if self.local_rank == 0:
-            pbar = tqdm.tqdm(
-                total=len(loader) * loader.batch_size,
-                bar_format="{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
-            )
+        pbar = tqdm.tqdm(
+            total=len(loader) * loader.batch_size,
+            bar_format="{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        )
 
         with torch.no_grad():
             self.local_step = 0
@@ -742,108 +712,80 @@ class Trainer(object):
 
                 preds, preds_depth, truths, loss = self.eval_step(data)
 
-                # all_gather/reduce the statistics (NCCL only support all_*)
-                if self.world_size > 1:
-                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-                    loss = loss / self.world_size
-
-                    preds_list = [
-                        torch.zeros_like(preds).to(self.device)
-                        for _ in range(self.world_size)
-                    ]  # [[B, ...], [B, ...], ...]
-                    dist.all_gather(preds_list, preds)
-                    preds = torch.cat(preds_list, dim=0)
-
-                    preds_depth_list = [
-                        torch.zeros_like(preds_depth).to(self.device)
-                        for _ in range(self.world_size)
-                    ]  # [[B, ...], [B, ...], ...]
-                    dist.all_gather(preds_depth_list, preds_depth)
-                    preds_depth = torch.cat(preds_depth_list, dim=0)
-
-                    truths_list = [
-                        torch.zeros_like(truths).to(self.device)
-                        for _ in range(self.world_size)
-                    ]  # [[B, ...], [B, ...], ...]
-                    dist.all_gather(truths_list, truths)
-                    truths = torch.cat(truths_list, dim=0)
-
                 loss_val = loss.item()
                 total_loss += loss_val
 
                 # only rank = 0 will perform evaluation.
-                if self.local_rank == 0:
-                    metric_vals = []
-                    for metric in self.metrics:
-                        metric_val = metric.update(preds, truths)
-                        metric_vals.append(metric_val)
+                metric_vals = []
+                for metric in self.metrics:
+                    metric_val = metric.update(preds, truths)
+                    metric_vals.append(metric_val)
 
-                    # save image
-                    save_path = os.path.join(
-                        self.workspace,
-                        "validation",
-                        f"{name}_{self.local_step:04d}_rgb.png",
-                    )
-                    save_path_depth = os.path.join(
-                        self.workspace,
-                        "validation",
-                        f"{name}_{self.local_step:04d}_depth.png",
-                    )
-                    save_path_error = os.path.join(
-                        self.workspace,
-                        "validation",
-                        f"{name}_{self.local_step:04d}_error_{metric_vals[0]:.2f}.png",
-                    )  # metric_vals[0] should be the PSNR
+                # save image
+                save_path = os.path.join(
+                    self.workspace,
+                    "validation",
+                    f"{name}_{self.local_step:04d}_rgb.png",
+                )
+                save_path_depth = os.path.join(
+                    self.workspace,
+                    "validation",
+                    f"{name}_{self.local_step:04d}_depth.png",
+                )
+                save_path_error = os.path.join(
+                    self.workspace,
+                    "validation",
+                    f"{name}_{self.local_step:04d}_error_{metric_vals[0]:.2f}.png",
+                )  # metric_vals[0] should be the PSNR
 
-                    # self.log(f"==> Saving validation image to {save_path}")
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                # self.log(f"==> Saving validation image to {save_path}")
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-                    pred = preds.detach().cpu().numpy()
-                    pred = (pred * 255).astype(np.uint8)
+                pred = preds.detach().cpu().numpy()
+                pred = (pred * 255).astype(np.uint8)
 
-                    pred_depth = preds_depth.detach().cpu().numpy()
-                    pred_depth = (pred_depth - pred_depth.min()) / (
-                        pred_depth.max() - pred_depth.min() + 1e-6
-                    )
-                    pred_depth = (pred_depth * 255).astype(np.uint8)
+                pred_depth = preds_depth.detach().cpu().numpy()
+                pred_depth = (pred_depth - pred_depth.min()) / (
+                    pred_depth.max() - pred_depth.min() + 1e-6
+                )
+                pred_depth = (pred_depth * 255).astype(np.uint8)
 
-                    truth = truths.detach().cpu().numpy()
-                    truth = (truth * 255).astype(np.uint8)
-                    error = (
-                        np.abs(truth.astype(np.float32) - pred.astype(np.float32))
-                        .mean(-1)
-                        .astype(np.uint8)
-                    )
+                truth = truths.detach().cpu().numpy()
+                truth = (truth * 255).astype(np.uint8)
+                error = (
+                    np.abs(truth.astype(np.float32) - pred.astype(np.float32))
+                    .mean(-1)
+                    .astype(np.uint8)
+                )
 
-                    cv2.imwrite(save_path, cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(save_path_depth, pred_depth)
-                    cv2.imwrite(save_path_error, error)
+                cv2.imwrite(save_path, cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(save_path_depth, pred_depth)
+                cv2.imwrite(save_path_error, error)
 
-                    pbar.set_description(
-                        f"loss={loss_val:.6f} ({total_loss/self.local_step:.6f})"
-                    )
-                    pbar.update(loader.batch_size)
+                pbar.set_description(
+                    f"loss={loss_val:.6f} ({total_loss/self.local_step:.6f})"
+                )
+                pbar.update(loader.batch_size)
 
         average_loss = total_loss / self.local_step
         self.stats["valid_loss"].append(average_loss)
 
-        if self.local_rank == 0:
-            pbar.close()
-            if not self.use_loss_as_metric and len(self.metrics) > 0:
-                result = self.metrics[0].measure()
-                self.stats["results"].append(
-                    result if self.best_mode == "min" else -result
-                )  # if max mode, use -result
-            else:
-                self.stats["results"].append(
-                    average_loss
-                )  # if no metric, choose best by min loss
+        pbar.close()
+        if not self.use_loss_as_metric and len(self.metrics) > 0:
+            result = self.metrics[0].measure()
+            self.stats["results"].append(
+                result if self.best_mode == "min" else -result
+            )  # if max mode, use -result
+        else:
+            self.stats["results"].append(
+                average_loss
+            )  # if no metric, choose best by min loss
 
-            for metric in self.metrics:
-                self.log(metric.report(), style="blue")
-                if self.use_tensorboardX:
-                    metric.write(self.writer, self.epoch, prefix="evaluate")
-                metric.clear()
+        for metric in self.metrics:
+            self.log(metric.report(), style="blue")
+            if self.use_tensorboardX:
+                metric.write(self.writer, self.epoch, prefix="evaluate")
+            metric.clear()
 
         if self.ema is not None:
             self.ema.restore()
