@@ -7,73 +7,86 @@ import imageio
 import numpy as np
 import tensorboardX
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
 from rich.console import Console
 from torch_ema import ExponentialMovingAverage
 
+from octree_nerf.Config.config import getConfig
 from octree_nerf.Method.ray import get_rays
-
+from octree_nerf.Method.random_seed import seed_everything
+from octree_nerf.Dataset.colmap import ColmapDataset
+from octree_nerf.Metric.lpips import LPIPSMeter
+from octree_nerf.Metric.psnr import PSNRMeter
+from octree_nerf.Metric.ssim import SSIMMeter
+from octree_nerf.Model.ngp import NeRFNetwork
 
 class Trainer(object):
     def __init__(
         self,
-        opt,  # extra conf
-        model,  # network
-        criterion=None,  # loss function, if None, assume inline implementation in train_step
-        optimizer=None,  # optimizer
-        ema_decay=None,  # if use EMA, set the decay
-        lr_scheduler=None,  # scheduler
-        metrics=[],  # metrics for evaluation, if None, use val_loss to measure performance, else use the first metric.
-        fp16=False,  # amp optimize level
-        eval_interval=1,  # eval once every $ epoch
-        save_interval=1,  # save once every $ epoch (independently from eval)
-        max_keep_ckpt=2,  # max num of saved ckpts in disk
-        workspace="workspace",  # workspace to save logs & ckpts
-        report_metric_at_train=False,  # also report metrics at training
-        use_checkpoint="latest",  # which ckpt to use at init time
-        use_tensorboardX=True,  # whether to use tensorboard for logging
-        scheduler_update_every_step=False,  # whether to call scheduler.step() after every train step
     ):
-        self.opt = opt
-        self.metrics = metrics
-        self.workspace = workspace
-        self.ema_decay = ema_decay
-        self.fp16 = fp16
-        self.report_metric_at_train = report_metric_at_train
-        self.max_keep_ckpt = max_keep_ckpt
-        self.eval_interval = eval_interval
-        self.save_interval = save_interval
-        self.use_checkpoint = use_checkpoint
-        self.use_tensorboardX = use_tensorboardX
         self.time_stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-        self.scheduler_update_every_step = scheduler_update_every_step
-        self.device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.console = Console()
+        self.log_ptr = None
 
-        # try out torch 2.0
+        self.opt = getConfig()
+
+        if self.opt.O:
+            self.opt.fp16 = True
+            self.opt.preload = True
+            self.opt.adaptive_num_rays = True
+            self.opt.random_image_batch = True
+            self.opt.cuda_ray = True
+            self.opt.mark_untrained = True
+
+        if self.opt.O2:
+            self.opt.fp16 = True
+            self.opt.preload = True
+            self.opt.adaptive_num_rays = True
+            self.opt.random_image_batch = True
+            self.opt.bound = 128  # large enough
+
+        seed_everything(self.opt.seed)
+
+        self.scheduler_update_every_step=False
+        self.report_metric_at_train = True
+        self.use_checkpoint = 'latest'
+        self.ema_decay = 0.95
+        self.max_keep_ckpt = 2
+        self.eval_interval = 100
+        self.save_interval = 100
+
+        self.workspace = self.opt.workspace
+        self.fp16 = self.opt.fp16
+
+        # self.criterion = torch.nn.MSELoss(reduction='none').to(self.device)
+        self.criterion = torch.nn.SmoothL1Loss(reduction="none").to(self.device)
+
+        self.metrics = [
+            PSNRMeter(),
+            SSIMMeter(),
+            LPIPSMeter(device=self.device),
+        ]
+
+        self.train_loader = ColmapDataset(self.opt, device=self.device, type=self.opt.train_split).dataloader()
+        self.test_loader = ColmapDataset(self.opt, device=self.device, type="test").dataloader()
+        self.valid_loader = ColmapDataset(self.opt, device=self.device, type="val").dataloader()
+
+        self.model = NeRFNetwork(self.opt).to(self.device)
+        self.model.update_aabb(self.train_loader._data.pts_aabb)
         if torch.__version__[0] == "2":
-            model = torch.compile(model)
+            self.model = torch.compile(self.model)
 
-        model.to(self.device)
-        self.model = model
+        self.optimizer = torch.optim.Adam(self.model.get_params(self.opt.lr), eps=1e-15)
 
-        if isinstance(criterion, nn.Module):
-            criterion.to(self.device)
-        self.criterion = criterion
-
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-
-        if ema_decay is not None:
-            self.ema = ExponentialMovingAverage(
-                self.model.parameters(), decay=ema_decay
-            )
-        else:
-            self.ema = None
+        self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer, lambda iter: 0.1 ** min(iter / self.opt.iters, 1)
+        )
 
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.fp16)
+
+        self.ema = ExponentialMovingAverage(self.model.parameters(), decay=self.ema_decay)
 
         # variable init
         self.epoch = 0
@@ -91,7 +104,7 @@ class Trainer(object):
         self.log_ptr = None
         if self.workspace is not None:
             os.makedirs(self.workspace, exist_ok=True)
-            self.log_path = os.path.join(workspace, f"log_ngp.txt")
+            self.log_path = os.path.join(self.workspace, f"log_ngp.txt")
             self.log_ptr = open(self.log_path, "a+")
 
             self.ckpt_path = os.path.join(self.workspace, "checkpoints")
@@ -102,10 +115,10 @@ class Trainer(object):
             f'[INFO] Trainer: ngp | {self.time_stamp} | {self.device} | {"fp16" if self.fp16 else "fp32"} | {self.workspace}'
         )
         self.log(
-            f"[INFO] #parameters: {sum([p.numel() for p in model.parameters() if p.requires_grad])}"
+            f"[INFO] #parameters: {sum([p.numel() for p in self.model.parameters() if p.requires_grad])}"
         )
 
-        self.log(opt)
+        self.log(self.opt)
         self.log(self.model)
 
         if self.workspace is not None:
@@ -305,10 +318,9 @@ class Trainer(object):
     ### ------------------------------
 
     def train(self, train_loader, valid_loader, max_epochs):
-        if self.use_tensorboardX:
-            self.writer = tensorboardX.SummaryWriter(
-                os.path.join(self.workspace, "run", "ngp")
-            )
+        self.writer = tensorboardX.SummaryWriter(
+            os.path.join(self.workspace, "run", "ngp")
+        )
 
         # mark untrained region (i.e., not covered by any camera from the training dataset)
         if self.opt.mark_untrained:
@@ -335,13 +347,10 @@ class Trainer(object):
 
         self.log(f"[INFO] training takes {(end_t - start_t)/ 60:.6f} minutes.")
 
-        if self.use_tensorboardX:
-            self.writer.close()
+        self.writer.close()
 
     def evaluate(self, loader, name=None):
-        self.use_tensorboardX, use_tensorboardX = False, self.use_tensorboardX
         self.evaluate_one_epoch(loader, name)
-        self.use_tensorboardX = use_tensorboardX
 
     def test(self, loader, save_path=None, name=None, write_video=True):
         if save_path is None:
@@ -598,6 +607,12 @@ class Trainer(object):
         self.local_step = 0
 
         for data in loader:
+            print('data:')
+            for key, item in data.items():
+                if isinstance(item, torch.Tensor):
+                    print(key, '-->', item.shape)
+            exit()
+
             # update grid every 16 steps
             if (
                 self.model.cuda_ray
@@ -629,15 +644,17 @@ class Trainer(object):
 
             if self.report_metric_at_train:
                 for metric in self.metrics:
+                    print('TEST!')
+                    print(preds.shape)
+                    print(truths.shape)
                     metric.update(preds, truths)
 
-            if self.use_tensorboardX:
-                self.writer.add_scalar("train/loss", loss_val, self.global_step)
-                self.writer.add_scalar(
-                    "train/lr",
-                    self.optimizer.param_groups[0]["lr"],
-                    self.global_step,
-                )
+            self.writer.add_scalar("train/loss", loss_val, self.global_step)
+            self.writer.add_scalar(
+                "train/lr",
+                self.optimizer.param_groups[0]["lr"],
+                self.global_step,
+            )
 
             if self.scheduler_update_every_step:
                 pbar.set_description(
@@ -659,8 +676,7 @@ class Trainer(object):
         if self.report_metric_at_train:
             for metric in self.metrics:
                 self.log(metric.report(), style="red")
-                if self.use_tensorboardX:
-                    metric.write(self.writer, self.epoch, prefix="train")
+                metric.write(self.writer, self.epoch, prefix="train")
                 metric.clear()
 
         if not self.scheduler_update_every_step:
@@ -765,8 +781,7 @@ class Trainer(object):
 
         for metric in self.metrics:
             self.log(metric.report(), style="blue")
-            if self.use_tensorboardX:
-                metric.write(self.writer, self.epoch, prefix="evaluate")
+            metric.write(self.writer, self.epoch, prefix="evaluate")
             metric.clear()
 
         if self.ema is not None:
@@ -828,10 +843,6 @@ class Trainer(object):
                         self.ema.copy_to()
 
                     state["model"] = self.model.state_dict()
-
-                    # we don't consider continued training from the best ckpt, so we discard the unneeded density_grid to save some storage (especially important for dnerf)
-                    # if 'density_grid' in state['model']:
-                    #     del state['model']['density_grid']
 
                     if self.ema is not None:
                         self.ema.restore()
