@@ -388,7 +388,7 @@ class ColmapDataset(Dataset):
         if self.images is not None:
             if self.training:
                 images = (
-                    self.images[index, rays["j"], rays["i"]].float().to(self.device)
+                    self.images[index, rays["j"].cpu(), rays["i"].cpu()].float().to(self.device)
                     / 255
                 )  # [N, 3/4]
             else:

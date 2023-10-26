@@ -52,7 +52,7 @@ class Trainer(object):
         self.scheduler_update_every_step=False
         self.report_metric_at_train = True
         self.use_checkpoint = 'latest'
-        self.batch_size = 4
+        self.batch_size = 1
         self.ema_decay = 0.95
         self.max_keep_ckpt = 2
         self.eval_interval = 100
@@ -156,21 +156,21 @@ class Trainer(object):
     ### ------------------------------
 
     def train_step(self, data):
-        rays_o = data["rays_o"]  # [B, N, 3]
-        rays_d = data["rays_d"]  # [B, N, 3]
-        index = data["index"]  # [B, N]
+        rays_o = data["rays_o"].reshape(-1, 3)  # [BxN, 3]
+        rays_d = data["rays_d"].reshape(-1, 3)  # [BxN, 3]
+        index = data["index"].reshape(-1)  # [BxN]
         cam_near_far = (
             data["cam_near_far"] if "cam_near_far" in data else None
-        )  # [B, N, 2] or None
+        ).reshape(-1, 2)  # [BxN, 2] or None
 
-        images = data["images"]  # [B, N, 3/4]
+        images = data["images"].reshape(-1, data["images"].shape[2])  # [BxN, 3/4]
 
-        B, N, C = images.shape
+        N, C = images.shape
 
         if self.opt.background == "random":
             bg_color = torch.rand(
-                B, N, 3, device=self.device
-            )  # [B, N, 3], pixel-wise random.
+                N, 3, device=self.device
+            )  # [BxN, 3], pixel-wise random.
         else:  # white / last_sample
             bg_color = 1
 
@@ -197,7 +197,7 @@ class Trainer(object):
 
         # MSE loss
         pred_rgb = outputs["image"]
-        loss = self.criterion(pred_rgb, gt_rgb).mean(-1)  # [B, N, 3] --> [B, N]
+        loss = self.criterion(pred_rgb, gt_rgb).mean(-1)  # [BxN, 3] --> [BxN]
 
         loss = loss.mean()
 

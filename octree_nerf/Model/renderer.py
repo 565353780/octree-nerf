@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import tqdm
 import trimesh
 
-from octree_nerf.Method.render import contract, uncontract
+from octree_nerf.Method.render import contract, uncontract, sample_pdf, near_far_from_aabb
 from octree_nerf.Loss.distort import distort_loss
 from octree_nerf.Loss.proposal import proposal_loss
 from octree_nerf.Lib import raymarching
@@ -416,8 +416,8 @@ class NeRFRenderer(nn.Module):
             all_bins = []
             all_weights = []
 
-        s_nears = self.spacing_fn(nears)  # [N, 1]
-        s_fars = self.spacing_fn(fars)  # [N, 1]
+        s_nears = self.spacing_fn(nears).reshape(-1, 1)  # [N, 1]
+        s_fars = self.spacing_fn(fars).reshape(-1, 1)  # [N, 1]
 
         bins = None
         weights = None
@@ -533,13 +533,13 @@ class NeRFRenderer(nn.Module):
         shading="full",
         **kwargs,
     ):
-        # rays_o, rays_d: [B, N, 3]
-        # return: image: [B, N, 3], depth: [B, N]
+        # rays_o, rays_d: [N, 3]
+        # return: image: [N, 3], depth: [N]
 
         rays_o = rays_o.contiguous()
         rays_d = rays_d.contiguous()
 
-        B, N = rays_o.shape[:2]
+        N = rays_o.shape[0]
         device = rays_o.device
 
         # pre-calculate near far
@@ -550,12 +550,9 @@ class NeRFRenderer(nn.Module):
             self.min_near,
         )
 
-        nears = nears.reshape(B, -1)
-        fars = fars.reshape(B, -1)
-
         if cam_near_far is not None:
-            nears = torch.maximum(nears, cam_near_far[:, :, 0])
-            fars = torch.minimum(fars, cam_near_far[:, :, 1])
+            nears = torch.maximum(nears, cam_near_far[:, 0])
+            fars = torch.minimum(fars, cam_near_far[:, 1])
 
         # mix background color
         if bg_color is None:
@@ -596,14 +593,13 @@ class NeRFRenderer(nn.Module):
         else:
             dtype = torch.float32
 
-            weights_sum = torch.zeros(B, N, dtype=dtype, device=device)
-            depth = torch.zeros(B, N, dtype=dtype, device=device)
-            image = torch.zeros(B, N, 3, dtype=dtype, device=device)
+            weights_sum = torch.zeros(N, dtype=dtype, device=device)
+            depth = torch.zeros(N, dtype=dtype, device=device)
+            image = torch.zeros(N, 3, dtype=dtype, device=device)
 
             n_alive = N
             rays_alive = torch.arange(n_alive, dtype=torch.int32, device=device)  # [N]
-            rays_alive = rays_alive.unsqueeze(0).repeat(0, B, 0) # [B, N]
-            rays_t = nears.clone()  # [B, N]
+            rays_t = nears.clone()  # [N]
 
             step = 0
 
@@ -663,8 +659,6 @@ class NeRFRenderer(nn.Module):
 
                 step += n_step
 
-        image = image.reshape(B, -1, image.shape[1])
-        weights_sum = weights_sum.reshape(B, -1)
         image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
 
         results["depth"] = depth
