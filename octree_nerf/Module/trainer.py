@@ -4,7 +4,6 @@ import time
 
 import cv2
 import imageio
-from lpips import LPIPS
 import numpy as np
 import tensorboardX
 import torch
