@@ -19,7 +19,6 @@ from octree_nerf.Method.ray import get_rays
 class Trainer(object):
     def __init__(
         self,
-        name,  # name of this experiment
         opt,  # extra conf
         model,  # network
         criterion=None,  # loss function, if None, assume inline implementation in train_step
@@ -32,21 +31,16 @@ class Trainer(object):
         save_interval=1,  # save once every $ epoch (independently from eval)
         max_keep_ckpt=2,  # max num of saved ckpts in disk
         workspace="workspace",  # workspace to save logs & ckpts
-        best_mode="min",  # the smaller/larger result, the better
-        use_loss_as_metric=True,  # use loss as the first metric
         report_metric_at_train=False,  # also report metrics at training
         use_checkpoint="latest",  # which ckpt to use at init time
         use_tensorboardX=True,  # whether to use tensorboard for logging
         scheduler_update_every_step=False,  # whether to call scheduler.step() after every train step
     ):
         self.opt = opt
-        self.name = name
         self.metrics = metrics
         self.workspace = workspace
         self.ema_decay = ema_decay
         self.fp16 = fp16
-        self.best_mode = best_mode
-        self.use_loss_as_metric = use_loss_as_metric
         self.report_metric_at_train = report_metric_at_train
         self.max_keep_ckpt = max_keep_ckpt
         self.eval_interval = eval_interval
@@ -93,23 +87,19 @@ class Trainer(object):
             "best_result": None,
         }
 
-        # auto fix
-        if len(metrics) == 0 or self.use_loss_as_metric:
-            self.best_mode = "min"
-
         # workspace prepare
         self.log_ptr = None
         if self.workspace is not None:
             os.makedirs(self.workspace, exist_ok=True)
-            self.log_path = os.path.join(workspace, f"log_{self.name}.txt")
+            self.log_path = os.path.join(workspace, f"log_ngp.txt")
             self.log_ptr = open(self.log_path, "a+")
 
             self.ckpt_path = os.path.join(self.workspace, "checkpoints")
-            self.best_path = f"{self.ckpt_path}/{self.name}.pth"
+            self.best_path = f"{self.ckpt_path}/ngp.pth"
             os.makedirs(self.ckpt_path, exist_ok=True)
 
         self.log(
-            f'[INFO] Trainer: {self.name} | {self.time_stamp} | {self.device} | {"fp16" if self.fp16 else "fp32"} | {self.workspace}'
+            f'[INFO] Trainer: ngp | {self.time_stamp} | {self.device} | {"fp16" if self.fp16 else "fp32"} | {self.workspace}'
         )
         self.log(
             f"[INFO] #parameters: {sum([p.numel() for p in model.parameters() if p.requires_grad])}"
@@ -317,7 +307,7 @@ class Trainer(object):
     def train(self, train_loader, valid_loader, max_epochs):
         if self.use_tensorboardX:
             self.writer = tensorboardX.SummaryWriter(
-                os.path.join(self.workspace, "run", self.name)
+                os.path.join(self.workspace, "run", "ngp")
             )
 
         # mark untrained region (i.e., not covered by any camera from the training dataset)
@@ -358,7 +348,7 @@ class Trainer(object):
             save_path = os.path.join(self.workspace, "results")
 
         if name is None:
-            name = f"{self.name}_ep{self.epoch:04d}"
+            name = f"ngp_ep{self.epoch:04d}"
 
         os.makedirs(save_path, exist_ok=True)
 
@@ -771,15 +761,7 @@ class Trainer(object):
         self.stats["valid_loss"].append(average_loss)
 
         pbar.close()
-        if not self.use_loss_as_metric and len(self.metrics) > 0:
-            result = self.metrics[0].measure()
-            self.stats["results"].append(
-                result if self.best_mode == "min" else -result
-            )  # if max mode, use -result
-        else:
-            self.stats["results"].append(
-                average_loss
-            )  # if no metric, choose best by min loss
+        self.stats["results"].append(average_loss)
 
         for metric in self.metrics:
             self.log(metric.report(), style="blue")

@@ -2,6 +2,7 @@ import torch
 import numpy as np
 
 
+from octree_nerf.Dataset.colmap import ColmapDataset as NeRFDataset
 from octree_nerf.Config.config import getConfig
 from octree_nerf.Metric.lpips import LPIPSMeter
 from octree_nerf.Metric.psnr import PSNRMeter
@@ -28,20 +29,8 @@ if __name__ == "__main__":
         opt.fp16 = True
         opt.bound = 128  # large enough
         opt.preload = True
-        opt.contract = True
         opt.adaptive_num_rays = True
         opt.random_image_batch = True
-
-    if opt.contract:
-        # mark untrained is not correct in contraction mode...
-        opt.mark_untrained = False
-
-    if opt.data_format == "colmap":
-        from octree_nerf.Dataset.colmap import ColmapDataset as NeRFDataset
-    elif opt.data_format == "dtu":
-        from octree_nerf.Dataset.dtu import DTUDataset as NeRFDataset
-    else:  # nerf
-        from octree_nerf.Dataset.nerf import NeRFDataset
 
     seed_everything(opt.seed)
 
@@ -54,7 +43,6 @@ if __name__ == "__main__":
 
     if opt.test:
         trainer = Trainer(
-            "ngp",
             opt,
             model,
             workspace=opt.workspace,
@@ -104,7 +92,7 @@ if __name__ == "__main__":
         )
 
         # colmap can estimate a more compact AABB
-        if not opt.contract and opt.data_format == "colmap":
+        if opt.data_format == "colmap":
             model.update_aabb(train_loader._data.pts_aabb)
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -112,7 +100,6 @@ if __name__ == "__main__":
         )
 
         trainer = Trainer(
-            "ngp",
             opt,
             model,
             workspace=opt.workspace,
