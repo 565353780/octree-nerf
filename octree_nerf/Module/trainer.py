@@ -4,6 +4,7 @@ import time
 
 import cv2
 import imageio
+from lpips import LPIPS
 import numpy as np
 import tensorboardX
 import torch
@@ -63,15 +64,14 @@ class Trainer(object):
         # self.criterion = torch.nn.MSELoss(reduction='none').to(self.device)
         self.criterion = torch.nn.SmoothL1Loss(reduction="none").to(self.device)
 
-        self.metrics = [
-            PSNRMeter(),
-            SSIMMeter(),
-            LPIPSMeter(device=self.device),
-        ]
-
         self.train_loader = ColmapDataset(self.opt, device=self.device, type=self.opt.train_split).dataloader()
         self.test_loader = ColmapDataset(self.opt, device=self.device, type="test").dataloader()
         self.valid_loader = ColmapDataset(self.opt, device=self.device, type="val").dataloader()
+
+        self.metrics = [PSNRMeter()]
+        if self.test_loader.has_gt:
+            self.metrics.append(SSIMMeter())
+            self.metrics.append(LPIPSMeter(device=self.device))
 
         self.model = NeRFNetwork(self.opt).to(self.device)
         self.model.update_aabb(self.train_loader._data.pts_aabb)
@@ -607,12 +607,6 @@ class Trainer(object):
         self.local_step = 0
 
         for data in loader:
-            print('data:')
-            for key, item in data.items():
-                if isinstance(item, torch.Tensor):
-                    print(key, '-->', item.shape)
-            exit()
-
             # update grid every 16 steps
             if (
                 self.model.cuda_ray
@@ -644,9 +638,6 @@ class Trainer(object):
 
             if self.report_metric_at_train:
                 for metric in self.metrics:
-                    print('TEST!')
-                    print(preds.shape)
-                    print(truths.shape)
                     metric.update(preds, truths)
 
             self.writer.add_scalar("train/loss", loss_val, self.global_step)
